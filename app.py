@@ -1,59 +1,71 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="OVERFITTERS Analytics", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="OVERFITTERS | Trading Engine", layout="wide")
+st.title(" OVERFITTERS | Prosperity Quantitative Dashboard")
 
-st.title(" OVERFITTERS | Market Data Deep Dive")
-
-# Optimized File Loader
+# --- DATA PROCESSING ---
 @st.cache_data
-def process_data(file):
-    df = pd.read_csv(file, sep=';')
-    # Pre-calculate critical metrics
-    df['spread'] = df['ask_price_1'] - df['bid_price_1']
+def process_data(df):
+    # Core Metrics
     df['mid_price'] = (df['ask_price_1'] + df['bid_price_1']) / 2
-    # Rolling Metrics
-    df['sma_20'] = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(20).mean())
-    df['volatility'] = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(20).std())
-    # Order Book Imbalance
-    df['imbalance'] = (df['bid_volume_1'] - df['ask_volume_1']) / (df['bid_volume_1'] + df['ask_volume_1'])
+    df['spread'] = df['ask_price_1'] - df['bid_price_1']
+    
+    # 1. Microstructure: Order Book Imbalance (OBi)
+    # If OBi > 0: Buying pressure, If OBi < 0: Selling pressure
+    df['OBi'] = (df['bid_volume_1'] - df['ask_volume_1']) / (df['bid_volume_1'] + df['ask_volume_1'])
+    
+    # 2. Risk Metrics: Mean Reversion (Z-Score)
+    rolling_mean = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(20).mean())
+    rolling_std = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(20).std())
+    df['z_score'] = (df['mid_price'] - rolling_mean) / rolling_std
+    
+    # 3. Volatility
+    df['volatility'] = df.groupby('product')['mid_price'].transform(lambda x: x.pct_change().rolling(20).std())
+    
     return df
 
-uploaded_file = st.sidebar.file_uploader("Upload Competition CSV", type="csv")
+# --- UI LAYER ---
+uploaded_file = st.sidebar.file_uploader("Upload Market Data (CSV)", type="csv")
 
 if uploaded_file:
-    df = process_data(uploaded_file)
-    product = st.sidebar.selectbox("Select Product", df['product'].unique())
-    p_df = df[df['product'] == product]
-
-    # Row 1: Key Performance Metrics
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Latest Mid-Price", f"{p_df['mid_price'].iloc[-1]:.2f}")
-    c2.metric("Avg Spread", f"{p_df['spread'].mean():.2f}")
-    c3.metric("Volatility (20t)", f"{p_df['volatility'].iloc[-1]:.4f}")
-    c4.metric("Current Imbalance", f"{p_df['imbalance'].iloc[-1]:.2f}")
-
-    # Row 2: Charts
-    # Subplots for Price vs SMA and Order Book Imbalance
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, 
-                        subplot_titles=(f"Price Action: {product}", "Market Imbalance"),
-                        row_heights=[0.7, 0.3])
-
-    fig.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['mid_price'], name="Mid Price"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['sma_20'], name="SMA 20"), row=1, col=1)
+    df = pd.read_csv(uploaded_file, sep=';')
+    df = process_data(df)
     
-    fig.add_trace(go.Bar(x=p_df['timestamp'], y=p_df['imbalance'], name="Imbalance"), row=2, col=1)
+    product = st.sidebar.selectbox("Select Product", df['product'].unique())
+    p_df = df[df['product'] == product].sort_values('timestamp')
 
-    fig.update_layout(height=700, template="plotly_dark", showlegend=True)
-    st.plotly_chart(fig, use_container_width=True)
+    # Tab System
+    tab1, tab2, tab3 = st.tabs(["📊 Price & Trends", "📈 Market Microstructure", "⚠️ Risk & Z-Score"])
 
-    # Row 3: Spread Analysis
-    st.subheader("Spread Distribution")
-    fig_spread = go.Figure(data=[go.Histogram(x=p_df['spread'])])
-    fig_spread.update_layout(template="plotly_dark", title="Spread Frequency")
-    st.plotly_chart(fig_spread, use_container_width=True)
+    with tab1:
+        st.subheader("Price Action")
+        fig1 = px.line(p_df, x='timestamp', y=['mid_price'], title="Mid Price Movement")
+        st.plotly_chart(fig1, use_container_width=True)
+
+    with tab2:
+        st.subheader("Order Book Pressure")
+        fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, subplot_titles=("Spread", "Order Book Imbalance"))
+        fig2.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['spread'], name="Spread"), row=1, col=1)
+        fig2.add_trace(go.Bar(x=p_df['timestamp'], y=p_df['OBi'], name="OB Imbalance"), row=2, col=1)
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with tab3:
+        st.subheader("Mean Reversion Signals")
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['z_score'], name="Z-Score"))
+        fig3.add_hline(y=2, line_dash="dash", line_color="red")
+        fig3.add_hline(y=-2, line_dash="dash", line_color="green")
+        st.plotly_chart(fig3, use_container_width=True)
+        st.write("Interpretation: Z-Score > 2 indicates **Overbought** (Short). Z-Score < -2 indicates **Oversold** (Long).")
+
+    # Data Table
+    st.subheader("Raw Analytics Data")
+    st.dataframe(p_df.tail(100))
 
 else:
-    st.warning("Upload your CSV to view OVERFITTERS analytics.")
+    st.info("Upload your CSV in the sidebar to begin analysis.")
