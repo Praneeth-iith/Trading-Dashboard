@@ -1,66 +1,63 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="OVERFITTERS | Quant-Suite", layout="wide")
-st.title(" OVERFITTERS | Market Microstructure Dashboard")
+st.set_page_config(layout="wide")
+st.title(" OVERFITTERS | Order-Flow & Trade Analytics")
+
+# --- DATA LOADERS ---
+@st.cache_data
+def load_market_data(file):
+    df = pd.read_csv(file, sep=';')
+    df['mid'] = (df['ask_price_1'] + df['bid_price_1']) / 2
+    return df
 
 @st.cache_data
-def process_data(df):
-    df['mid_price'] = (df['ask_price_1'] + df['bid_price_1']) / 2
-    df['spread'] = df['ask_price_1'] - df['bid_price_1']
-    df['OBi'] = (df['bid_volume_1'] - df['ask_volume_1']) / (df['bid_volume_1'] + df['ask_volume_1'])
-    
-    rolling_mean = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(30).mean())
-    rolling_std = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(30).std())
-    
-    df['z_score'] = ((df['mid_price'] - rolling_mean) / rolling_std).clip(-2, 2)
-    df['wallmid'] = df['mid_price'] + (df['OBi'] * df['spread'])
-    df['wallmid_norm'] = ((df['wallmid'] - rolling_mean) / rolling_std).clip(-2, 2)
-    
-    return df.fillna(0)
+def load_trade_data(file):
+    return pd.read_csv(file, sep=';')
 
-uploaded_file = st.sidebar.file_uploader("Upload Market CSV", type="csv")
+# --- SIDEBAR ---
+st.sidebar.header("Data Upload")
+market_file = st.sidebar.file_uploader("Upload Market CSV", type="csv")
+trades_file = st.sidebar.file_uploader("Upload Trades CSV", type="csv")
 
-if uploaded_file:
-    df = process_data(pd.read_csv(uploaded_file, sep=';'))
-    product = st.sidebar.selectbox("Select Product", df['product'].unique())
-    p_df = df[df['product'] == product].sort_values('timestamp')
+if market_file and trades_file:
+    df_m = load_market_data(market_file)
+    df_t = load_trade_data(trades_file)
+    
+    product = st.sidebar.selectbox("Select Product", df_m['product'].unique())
+    m_df = df_m[df_m['product'] == product].sort_values('timestamp')
+    t_df = df_t[df_t['symbol'] == product].sort_values('timestamp')
 
-    # Custom Chart for Mid Price + Best Bid/Ask
-    def create_price_chart():
+    # --- ORDER FLOW LOGIC ---
+    # Determine if trade was a "Buy" (above mid) or "Sell" (below mid)
+    t_df = pd.merge_asof(t_df, m_df[['timestamp', 'mid']], on='timestamp', direction='nearest')
+    t_df['side'] = ['Buy' if p > m else 'Sell' for p, m in zip(t_df['price'], t_df['mid'])]
+    
+    # --- DASHBOARD LAYOUT ---
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.subheader("Price & Trade Execution")
         fig = go.Figure()
-        # Add Best Ask
-        fig.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['ask_price_1'], name="Best Ask", 
-                                 line=dict(color='red', width=1, dash='dot')))
-        # Add Mid Price
-        fig.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['mid_price'], name="Mid Price", 
-                                 line=dict(color='#00CC96', width=2)))
-        # Add Best Bid
-        fig.add_trace(go.Scatter(x=p_df['timestamp'], y=p_df['bid_price_1'], name="Best Bid", 
-                                 line=dict(color='blue', width=1, dash='dot')))
-        
-        fig.update_layout(title="Mid Price, Best Bid & Best Ask", template="plotly_dark", 
-                          height=350, hovermode="x unified")
-        return fig
+        fig.add_trace(go.Scatter(x=m_df['timestamp'], y=m_df['mid'], name="Mid Price", line=dict(color='gray', dash='dot')))
+        fig.add_trace(go.Scatter(x=t_df['timestamp'], y=t_df['price'], mode='markers', 
+                                 marker=dict(color=t_df['side'].map({'Buy':'green', 'Sell':'red'}), size=8), name="Trades"))
+        fig.update_layout(template="plotly_dark", height=400)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Standard chart for others
-    def create_chart(col_name, title, color):
-        c_data = p_df[['mid_price', 'spread', 'OBi', 'wallmid_norm', 'z_score']].values
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=p_df['timestamp'], y=p_df[col_name], name=title, line=dict(color=color),
-            customdata=c_data,
-            hovertemplate=f"<b>{title}: %{{y:.2f}}</b><br>Mid: %{{customdata[0]:.2f}}<br>Spr: %{{customdata[1]:.2f}}<br>OBi: %{{customdata[2]:.3f}}<extra></extra>"
-        ))
-        fig.update_layout(title=title, template="plotly_dark", height=250, hovermode="x unified")
-        return fig
+    with c2:
+        st.subheader("Aggressive Buy vs Sell Volume")
+        vol_df = t_df.groupby('side')['quantity'].sum().reset_index()
+        fig_pie = px.pie(vol_df, values='quantity', names='side', color='side', 
+                         color_discrete_map={'Buy':'green', 'Sell':'red'}, template="plotly_dark")
+        st.plotly_chart(fig_pie, use_container_width=True)
 
-    # Display
-    st.plotly_chart(create_price_chart(), use_container_width=True)
-    st.plotly_chart(create_chart('spread', 'Spread', '#EF553B'), use_container_width=True)
-    st.plotly_chart(create_chart('OBi', 'Order Book Imbalance', '#636EFA'), use_container_width=True)
-    st.plotly_chart(create_chart('wallmid_norm', 'WallMid Normalized (-2 to 2)', '#AB63FA'), use_container_width=True)
+    # --- VOLUME PROFILE ---
+    st.subheader("Trade Heatmap (Price Levels)")
+    fig_hist = px.histogram(t_df, x='price', color='side', barmode='overlay', template="plotly_dark")
+    st.plotly_chart(fig_hist, use_container_width=True)
 
 else:
-    st.info("Upload your market data to begin.")
+    st.info("Upload BOTH Market Data and Trades CSV to begin Order-Flow analysis.")
