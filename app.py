@@ -2,31 +2,30 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-# Set page to wide
+# Set page config
 st.set_page_config(page_title="OVERFITTERS | Quant-Suite", layout="wide")
 st.title(" OVERFITTERS | Market Microstructure Dashboard")
 
 @st.cache_data
 def process_data(df):
-    # 1. Base Metrics
+    # Calculations
     df['mid_price'] = (df['ask_price_1'] + df['bid_price_1']) / 2
     df['spread'] = df['ask_price_1'] - df['bid_price_1']
     df['OBi'] = (df['bid_volume_1'] - df['ask_volume_1']) / (df['bid_volume_1'] + df['ask_volume_1'])
     
-    # 2. WallMid (Weighted by Order Book Imbalance)
-    df['wallmid'] = df['mid_price'] + (df['OBi'] * df['spread'])
-    
-    # 3. Z-Score (Statistical Mean Reversion)
+    # Rolling stats
     rolling_mean = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(30).mean())
     rolling_std = df.groupby('product')['mid_price'].transform(lambda x: x.rolling(30).std())
-    df['z_score'] = ((df['mid_price'] - rolling_mean) / rolling_std).clip(-2, 2)
     
-    # 4. WallMid Normalized (-2 to 2)
+    # Normalized stats
+    df['z_score'] = ((df['mid_price'] - rolling_mean) / rolling_std).clip(-2, 2)
+    df['wallmid'] = df['mid_price'] + (df['OBi'] * df['spread'])
     wm_mean = df.groupby('product')['wallmid'].transform(lambda x: x.rolling(30).mean())
     wm_std = df.groupby('product')['wallmid'].transform(lambda x: x.rolling(30).std())
     df['wallmid_norm'] = ((df['wallmid'] - wm_mean) / wm_std).clip(-2, 2)
     
-    return df
+    # Fill any NaNs created by rolling
+    return df.fillna(0)
 
 # Sidebar
 uploaded_file = st.sidebar.file_uploader("Upload Market CSV", type="csv")
@@ -37,13 +36,15 @@ if uploaded_file:
     p_df = df[df['product'] == product].sort_values('timestamp')
 
     # Function to create standardized charts
-   def create_chart(col_name, title, color):
+    def create_chart(col_name, title, color):
+        # We prepare the customdata as a list of lists for Plotly
+        c_data = p_df[['mid_price', 'spread', 'OBi', 'wallmid_norm', 'z_score']].values
+        
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=p_df['timestamp'], y=p_df[col_name], 
             name=title, line=dict(color=color),
-            # customdata must be a 2D array for hovertemplate to read it correctly
-            customdata=p_df[['mid_price', 'spread', 'OBi', 'wallmid_norm', 'z_score']].values,
+            customdata=c_data,
             hovertemplate=(
                 f"<b>{title}: %{{y:.2f}}</b><br>"
                 "MidPrice: %{customdata[0]:.2f}<br>"
@@ -59,6 +60,7 @@ if uploaded_file:
             hovermode="x unified"
         )
         return fig
+
     # Display Charts
     st.plotly_chart(create_chart('mid_price', 'Mid Price', '#00CC96'), use_container_width=True)
     st.plotly_chart(create_chart('spread', 'Spread', '#EF553B'), use_container_width=True)
