@@ -37,19 +37,20 @@ if uploaded_file:
     p_df = df[df['product'] == product].sort_values('timestamp')
 
     # Function to create standardized charts
-    def create_chart(col_name, title, color):
+   def create_chart(col_name, title, color):
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=p_df['timestamp'], y=p_df[col_name], 
-            name=col_name, line=dict(color=color),
-            customdata=p_df[['mid_price', 'spread', 'OBi', 'wallmid_norm', 'z_score']],
+            name=title, line=dict(color=color),
+            # customdata must be a 2D array for hovertemplate to read it correctly
+            customdata=p_df[['mid_price', 'spread', 'OBi', 'wallmid_norm', 'z_score']].values,
             hovertemplate=(
                 f"<b>{title}: %{{y:.2f}}</b><br>"
-                "MidPrice: %{{customdata[0]:.2f}}<br>"
-                "Spread: %{{customdata[1]:.2f}}<br>"
-                "OBi: %{{customdata[2]:.3f}}<br>"
-                "WallMid Norm: %{{customdata[3]:.2f}}<br>"
-                "Z-Score: %{{customdata[4]:.2f}}<extra></extra>"
+                "MidPrice: %{customdata[0]:.2f}<br>"
+                "Spread: %{customdata[1]:.2f}<br>"
+                "OBi: %{customdata[2]:.3f}<br>"
+                "WallMid Norm: %{customdata[3]:.2f}<br>"
+                "Z-Score: %{customdata[4]:.2f}<extra></extra>"
             )
         ))
         fig.update_layout(
@@ -58,7 +59,6 @@ if uploaded_file:
             hovermode="x unified"
         )
         return fig
-
     # Display Charts
     st.plotly_chart(create_chart('mid_price', 'Mid Price', '#00CC96'), use_container_width=True)
     st.plotly_chart(create_chart('spread', 'Spread', '#EF553B'), use_container_width=True)
