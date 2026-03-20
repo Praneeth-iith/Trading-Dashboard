@@ -6,7 +6,7 @@ import plotly.express as px
 
 st.set_page_config(layout="wide", page_title="OVERFITTERS PRO")
 
-st.title("🚀 OVERFITTERS PRO | Quant Trading Terminal")
+st.title("OVERFITTERS PRO | Quant Trading Terminal by Praneeth")
 
 # =========================
 # DATA PROCESSING
@@ -56,40 +56,28 @@ def process_data(m_df, t_df):
 # =========================
 def generate_signals(df):
 
-    signals = []
+    signals = ['HOLD'] * len(df)   # same length as df
 
     for i in range(1, len(df)):
         row = df.iloc[i]
         prev = df.iloc[i-1]
 
-        # =========================
-        # ABSORPTION SIGNAL
-        # =========================
-        if row['side'] == 'Sell':
-            if row['price'] >= prev['price']:  # price not falling
-                signals.append("BUY_ABSORB")
+        # Absorption
+        if row['side'] == 'Sell' and row['price'] >= prev['price']:
+            signals[i] = "BUY_ABSORB"
 
-        if row['side'] == 'Buy':
-            if row['price'] <= prev['price']:  # price not rising
-                signals.append("SELL_ABSORB")
+        elif row['side'] == 'Buy' and row['price'] <= prev['price']:
+            signals[i] = "SELL_ABSORB"
 
-        # =========================
-        # IMBALANCE SIGNAL
-        # =========================
+        # Imbalance
         elif row['imbalance'] > 0.3:
-            signals.append("BUY_IMB")
+            signals[i] = "BUY_IMB"
 
         elif row['imbalance'] < -0.3:
-            signals.append("SELL_IMB")
+            signals[i] = "SELL_IMB"
 
-        else:
-            signals.append("HOLD")
-
-    df = df.iloc[1:]
     df['signal'] = signals
-
     return df
-
 
 # =========================
 # SIMPLE PNL ENGINE
@@ -187,7 +175,7 @@ if market_file and trades_file:
     # =========================
     # CHART 2: IMBALANCE
     # =========================
-    st.subheader("⚖️ Order Book Imbalance")
+    st.subheader("Order Book Imbalance")
 
     fig2 = px.line(df, x='timestamp', y='imbalance')
     st.plotly_chart(fig2, use_container_width=True)
@@ -195,7 +183,7 @@ if market_file and trades_file:
     # =========================
     # CHART 3: VOLUME PROFILE
     # =========================
-    st.subheader("🔥 Volume Profile")
+    st.subheader(" Volume Profile")
 
     fig3 = px.histogram(
         df,
