@@ -1,214 +1,159 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
+from plotly.subplots import make_subplots
+import glob
+import re
+import plotly.io as pio
 
-st.set_page_config(layout="wide", page_title="OVERFITTERS PRO")
+pio.renderers.default = 'notebook_connected'
 
-st.title("OVERFITTERS PRO | Quant Trading Terminal by Praneeth")
 
 # =========================
-# DATA PROCESSING
+# 1. LOAD MULTI-DAY DATA
 # =========================
-@st.cache_data
-def process_data(m_df, t_df):
-    m_df = m_df.sort_values('timestamp')
-    t_df = t_df.sort_values('timestamp')
+def load_data(folder_path):
 
-    # ✅ NO FUTURE LEAK
-    df = pd.merge_asof(
-        t_df,
-        m_df[['timestamp', 'bid_price_1', 'ask_price_1',
-              'bid_volume_1', 'ask_volume_1']],
-        on='timestamp',
-        direction='backward'
+    price_files = glob.glob(f"{folder_path}/prices_round_1_day_*.csv")
+    trade_files = glob.glob(f"{folder_path}/trades_round_1_day_*.csv")
+
+    if len(price_files) == 0:
+        print("❌ No price files found")
+        return None, None
+
+    # ---- PRICES ----
+    price_dfs = []
+    for f in price_files:
+        df = pd.read_csv(f, sep=';')
+
+        day_match = re.search(r'day_(-?\d+)', f)
+        df['day'] = int(day_match.group(1)) if day_match else 0
+
+        price_dfs.append(df)
+
+    df_prices = pd.concat(price_dfs).sort_values(['product', 'day', 'timestamp'])
+
+
+    # ---- TRADES ----
+    trade_dfs = []
+    for f in trade_files:
+        df = pd.read_csv(f, sep=';')
+
+        day_match = re.search(r'day_(-?\d+)', f)
+        df['day'] = int(day_match.group(1)) if day_match else 0
+
+        if 'symbol' not in df.columns and 'product' in df.columns:
+            df = df.rename(columns={'product': 'symbol'})
+
+        trade_dfs.append(df)
+
+    df_trades = pd.concat(trade_dfs).sort_values(['symbol', 'day', 'timestamp'])
+
+
+    # ---- FEATURES ----
+    df_prices['mid'] = (df_prices['bid_price_1'] + df_prices['ask_price_1']) / 2
+    df_prices['spread'] = df_prices['ask_price_1'] - df_prices['bid_price_1']
+
+    df_prices['imbalance'] = (
+        (df_prices['bid_volume_1'] - df_prices['ask_volume_1']) /
+        (df_prices['bid_volume_1'] + df_prices['ask_volume_1'] + 1e-9)
     )
 
-    # Mid price
-    df['mid'] = (df['bid_price_1'] + df['ask_price_1']) / 2
+    return df_prices, df_trades
 
-    # =========================
-    # ROBUST TRADE CLASSIFICATION
-    # =========================
-    df['side'] = 'Neutral'
 
-    df.loc[df['price'] >= df['ask_price_1'], 'side'] = 'Buy'
-    df.loc[df['price'] <= df['bid_price_1'], 'side'] = 'Sell'
+# =========================
+# 2. ANALYZER FUNCTION
+# =========================
+def analyze(product):
 
-    # fallback (mid-based)
-    df.loc[(df['side'] == 'Neutral') & (df['price'] > df['mid']), 'side'] = 'Buy'
-    df.loc[(df['side'] == 'Neutral') & (df['price'] < df['mid']), 'side'] = 'Sell'
+    p_df = df_prices[df_prices['product'] == product]
+    t_df = df_trades[df_trades['symbol'] == product]
 
-    # =========================
-    # ORDER BOOK IMBALANCE
-    # =========================
-    df['imbalance'] = (
-        (df['bid_volume_1'] - df['ask_volume_1']) /
-        (df['bid_volume_1'] + df['ask_volume_1'] + 1e-9)
+    if p_df.empty:
+        print("No price data")
+        return
+
+    fig = make_subplots(
+        rows=4, cols=1, shared_xaxes=True,
+        vertical_spacing=0.05,
+        subplot_titles=[
+            "Price (Bid/Ask + Trades)",
+            "Spread",
+            "Order Book Imbalance",
+            "Trade Volume"
+        ],
+        row_heights=[0.5, 0.15, 0.15, 0.2]
     )
 
-    return m_df, df
-
-
-# =========================
-# SIGNAL ENGINE
-# =========================
-def generate_signals(df):
-
-    signals = ['HOLD'] * len(df)   # same length as df
-
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i-1]
-
-        # Absorption
-        if row['side'] == 'Sell' and row['price'] >= prev['price']:
-            signals[i] = "BUY_ABSORB"
-
-        elif row['side'] == 'Buy' and row['price'] <= prev['price']:
-            signals[i] = "SELL_ABSORB"
-
-        # Imbalance
-        elif row['imbalance'] > 0.3:
-            signals[i] = "BUY_IMB"
-
-        elif row['imbalance'] < -0.3:
-            signals[i] = "SELL_IMB"
-
-    df['signal'] = signals
-    return df
-
-# =========================
-# SIMPLE PNL ENGINE
-# =========================
-def simulate(df):
-    position = 0
-    cash = 0
-    max_pos = 80
-
-    pnl = []
-
-    for _, row in df.iterrows():
-
-        if row['signal'] in ['BUY_ABSORB', 'BUY_IMB'] and position < max_pos:
-            position += 1
-            cash -= row['price']
-
-        elif row['signal'] in ['SELL_ABSORB', 'SELL_IMB'] and position > -max_pos:
-            position -= 1
-            cash += row['price']
-
-        pnl.append(cash + position * row['price'])
-
-    df['pnl'] = pnl
-    df['position'] = position
-
-    return df
-
-
-# =========================
-# UI
-# =========================
-col1, col2 = st.columns(2)
-
-market_file = col1.file_uploader("Upload Market CSV", type="csv")
-trades_file = col2.file_uploader("Upload Trades CSV", type="csv")
-
-if market_file and trades_file:
-
-    m_df = pd.read_csv(market_file, sep=';')
-    t_df = pd.read_csv(trades_file, sep=';')
-
-    m_df, df = process_data(m_df, t_df)
-
-    product = st.sidebar.selectbox("Product", m_df['product'].unique())
-
-    m_df = m_df[m_df['product'] == product]
-    df = df[df['symbol'] == product]
-
-    df = generate_signals(df)
-    df = simulate(df)
-
     # =========================
-    # CHART 1: PRICE + TRADES
+    # PRICE
     # =========================
-    st.subheader("📊 Market + Trades")
-
-    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=p_df['timestamp'],
+        y=p_df['ask_price_1'],
+        name='Ask'
+    ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
-        x=m_df['timestamp'],
-        y=m_df['ask_price_1'],
-        name="Ask",
-        line=dict(color='red', dash='dot')
-    ))
+        x=p_df['timestamp'],
+        y=p_df['bid_price_1'],
+        name='Bid'
+    ), row=1, col=1)
 
+    if not t_df.empty:
+        fig.add_trace(go.Scatter(
+            x=t_df['timestamp'],
+            y=t_df['price'],
+            mode='markers',
+            name='Trades'
+        ), row=1, col=1)
+
+    # =========================
+    # SPREAD
+    # =========================
     fig.add_trace(go.Scatter(
-        x=m_df['timestamp'],
-        y=m_df['bid_price_1'],
-        name="Bid",
-        line=dict(color='blue', dash='dot')
-    ))
+        x=p_df['timestamp'],
+        y=p_df['spread'],
+        fill='tozeroy',
+        name='Spread'
+    ), row=2, col=1)
 
-    buys = df[df['side'] == 'Buy']
-    sells = df[df['side'] == 'Sell']
-
+    # =========================
+    # IMBALANCE
+    # =========================
     fig.add_trace(go.Scatter(
-        x=buys['timestamp'],
-        y=buys['price'],
-        mode='markers',
-        name="Agg Buy",
-        marker=dict(color='green', size=6)
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=sells['timestamp'],
-        y=sells['price'],
-        mode='markers',
-        name="Agg Sell",
-        marker=dict(color='red', size=6)
-    ))
-
-    st.plotly_chart(fig, use_container_width=True)
+        x=p_df['timestamp'],
+        y=p_df['imbalance'],
+        name='Imbalance'
+    ), row=3, col=1)
 
     # =========================
-    # CHART 2: IMBALANCE
+    # TRADE VOLUME
     # =========================
-    st.subheader("Order Book Imbalance")
+    if not t_df.empty:
+        fig.add_trace(go.Histogram(
+            x=t_df['quantity'],
+            name='Trade Size Dist'
+        ), row=4, col=1)
 
-    fig2 = px.line(df, x='timestamp', y='imbalance')
-    st.plotly_chart(fig2, use_container_width=True)
-
-    # =========================
-    # CHART 3: VOLUME PROFILE
-    # =========================
-    st.subheader(" Volume Profile")
-
-    fig3 = px.histogram(
-        df,
-        x='price',
-        y='quantity',
-        color='side',
-        barmode='group'
+    fig.update_layout(
+        height=900,
+        template='plotly_dark',
+        title=f"Analyzer: {product} (All Days Combined)"
     )
 
-    st.plotly_chart(fig3, use_container_width=True)
+    fig.show()
 
-    # =========================
-    # CHART 4: PNL
-    # =========================
-    st.subheader("💰 Strategy PnL")
 
-    fig4 = px.line(df, x='timestamp', y='pnl')
-    st.plotly_chart(fig4, use_container_width=True)
+# =========================
+# 3. RUN
+# =========================
 
-    # =========================
-    # METRICS
-    # =========================
-    st.sidebar.metric("Final PnL", round(df['pnl'].iloc[-1], 2))
-    st.sidebar.metric("Trades", len(df))
-    st.sidebar.metric("Avg Imbalance", round(df['imbalance'].mean(), 3))
+df_prices, df_trades = load_data("ROUND_1")
 
-else:
-    st.info("Upload both CSVs to start")
+# 🔥 List products
+print("Products:", df_prices['product'].unique())
+
+# 👉 CHANGE THIS MANUALLY
+analyze(product=df_prices['product'].iloc[0])
